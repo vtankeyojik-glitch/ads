@@ -54,20 +54,45 @@
             return;
         }
 
-        var state = { on: true };
+        var state = { on: true, adCheckReads: 0 };
+        var realYoutube = data.youtube;
 
         skipState = state;
         data[FLAG] = true;
 
         try {
+            // В ima.js getMediaType(player_data) всегда читает player_data.youtube
+            // прямо перед двумя чтениями player_data.iptv (и в Preroll.show, и в Banner).
+            if (!realYoutube) {
+                Object.defineProperty(data, 'youtube', {
+                    configurable: true,
+                    enumerable: false,
+                    get: function () {
+                        if (enabled()) state.adCheckReads = 2;
+                        return realYoutube;
+                    },
+                    set: function (v) {
+                        realYoutube = v;
+                    }
+                });
+            }
+
+            // enumerable: false — чтобы console.log(data) и JSON.stringify(data)
+            // (в т.ч. Android.openPlayer до события 'external') не видели iptv: true.
             Object.defineProperty(data, 'iptv', {
                 configurable: true,
-                enumerable: true,
+                enumerable: false,
                 get: function () {
+                    if (!enabled()) return false;
+                    if (state.adCheckReads > 0) {
+                        state.adCheckReads--;
+                        return true;
+                    }
                     return state.on;
                 },
                 set: function (v) {
                     state.on = false;
+                    state.adCheckReads = 0;
 
                     Object.defineProperty(data, 'iptv', {
                         value: v,
@@ -82,6 +107,43 @@
             data.iptv = true;
             console.log('NO-ADS', 'defineProperty failed:', e.message);
         }
+    }
+
+    function blockVastXhr() {
+        if (typeof XMLHttpRequest === 'undefined' || XMLHttpRequest.prototype.__lampa_no_ads_xhr) return;
+
+        XMLHttpRequest.prototype.__lampa_no_ads_xhr = true;
+
+        var origOpen = XMLHttpRequest.prototype.open;
+        var origSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function (method, url) {
+            this.__lampa_no_ads_block = Boolean(
+                enabled() && typeof url === 'string' && url.indexOf('/api/ad/get/') !== -1
+            );
+
+            return origOpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = function () {
+            if (this.__lampa_no_ads_block) {
+                var self = this;
+
+                setTimeout(function () {
+                    try {
+                        Object.defineProperty(self, 'status', { value: 200, configurable: true });
+                        Object.defineProperty(self, 'responseText', { value: '{"ad":[]}', configurable: true });
+                    }
+                    catch (e) {}
+
+                    if (typeof self.onload === 'function') self.onload();
+                }, 0);
+
+                return;
+            }
+
+            return origSend.apply(this, arguments);
+        };
     }
 
     function wrapPlay() {
@@ -105,6 +167,25 @@
                 markSkip(data);
 
                 return origIptv.apply(this, arguments);
+            };
+        }
+
+        // Важно: Panel, Info и Footer подписываются на 'start' при инициализации Lampa
+        // (раньше плагинов). Перехватываем send(), чтобы сбрасывать skipState ДО того,
+        // как Info и Footer прочитают data.iptv в своих обработчиках 'start'.
+        var listener = Lampa.Player.listener;
+        if (listener && typeof listener.send === 'function' && !listener.__lampa_no_ads_send) {
+            listener.__lampa_no_ads_send = true;
+            var origSend = listener.send;
+
+            listener.send = function (type, event) {
+                if (type === 'create') {
+                    markSkip(event && event.data);
+                } else if (type === 'start' || type === 'external' || type === 'destroy') {
+                    releaseSkip();
+                }
+
+                return origSend.apply(this, arguments);
             };
         }
     }
@@ -134,6 +215,7 @@
             console.log('NO-ADS', 'settings api error:', e.message);
         }
 
+        blockVastXhr();
         wrapPlay();
 
         Lampa.Player.listener.follow('create', function (e) {

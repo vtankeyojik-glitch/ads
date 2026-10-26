@@ -51,9 +51,9 @@ function makeLampa() {
 /* ---------- точная копия getMediaType() из src/interaction/advert/ima.js ---------- */
 
 function getMediaType(player_data) {
-    let is_torrent = false;
-    let is_youtube = false;
-    let is_continue = false;
+    let is_torrent = Boolean(player_data.torrent_hash);
+    let is_youtube = Boolean(player_data.youtube);
+    let is_continue = Boolean(player_data.continue_play);
 
     return {
         iptv: player_data.iptv,
@@ -73,6 +73,13 @@ function canShow(player_data) {
 /* ---------- загрузка плагина ---------- */
 
 const lampa = makeLampa();
+
+// Имитируем Info.init() / Footer.init(), которые подписываются на 'start' ДО загрузки плагинов
+let infoSawIptvOnStart = null;
+lampa.Player.listener.follow('start', (d) => {
+    infoSawIptvOnStart = d.iptv;
+});
+
 const sandbox = {
     window: { appready: true },
     Lampa: lampa,
@@ -100,16 +107,20 @@ console.log('no-ads.js');
 // 1. Player.play + лишние чтения iptv до preroll (console.log / другие плагины)
 const data = { url: 'https://example.com/movie.mp4', title: 'Test' };
 lampa.Player.play(data);
-JSON.stringify(data);
+const serializedBeforeExternal = JSON.stringify(data);
+check('Android.openPlayer JSON.stringify(data) не содержит iptv:true', !serializedBeforeExternal.includes('"iptv":true'), serializedBeforeExternal);
 data.iptv;
 data.iptv;
 const type = getMediaType(data);
 check('реклама пропускается после лишних чтений (type.any === true)', type.any === true, type);
 check('canShow === false пока плеер не стартовал', canShow(data) === false, canShow(data));
 
-// 2. После start интерфейс плеера должен видеть обычное значение
+// 2. Во время и после start интерфейс плеера (Info, Footer, Panel) должен видеть false
 lampa.Player.listener.send('start', data);
-check('после start data.iptv === false', data.iptv === false, data.iptv);
+check('ранние подписчики start (Info/Footer) видят data.iptv === false', infoSawIptvOnStart === false, infoSawIptvOnStart);
+check('после start data.iptv === false (для Panel)', data.iptv === false, data.iptv);
+check('Banner mid-roll после start тоже пропускается (canShow === false)', canShow(data) === false, canShow(data));
+check('после проверки Banner data.iptv для Panel по-прежнему false', data.iptv === false, data.iptv);
 
 // 3. Если Lampa сама выставила iptv (режим IPTV) — не ломаем
 const ipTV = { url: 'x', iptv: true };
