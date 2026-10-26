@@ -129,12 +129,10 @@
      * Рівень 1: Перехоплення мережевих запитів (XHR та $.ajax).
      * Виконується НЕГАЙНО, щоб встигнути ДО виклику Personal.init() та AdManager.init() у startApp().
      */
-    var AD_API_RE = /\/api\/ad\/get\/|\/api\/ad\/stat/i;
-    var VAST_URL_RE = /vast|preroll|midroll|pausebanner|adfox|yandex\.ru\/ads|googlesyndication|doubleclick\.net|imasdk\.googleapis\.com|bwa\.to\/.*vast|cub\..*\/api\/ad/i;
-    var EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"></VAST>';
+    var AD_API_RE = /\/api\/ad\/(get|stat)/i;
 
     function hookNetwork() {
-        // 1a. Перехоплення jQuery.ajax (для ./personal.lampa та /api/ad/get/*)
+        // Перехоплення jQuery.ajax виключно для ./personal.lampa та /api/ad/*
         if (window.$ && typeof window.$.ajax === 'function' && !window.$.ajax.__noAdsWrapped) {
             var origAjax = window.$.ajax;
             var wrappedAjax = function (url, options) {
@@ -146,65 +144,20 @@
                         if (opts && typeof opts.success === 'function') {
                             opts.success('1');
                         }
-                        var dfd = window.$.Deferred ? window.$.Deferred().resolve('1') : { then: function (fn) { if (fn) fn('1'); return this; } };
-                        return dfd;
+                        return window.$.Deferred ? window.$.Deferred().resolve('1') : { then: function (fn) { if (fn) fn('1'); return this; } };
                     }
                     if (AD_API_RE.test(reqUrl)) {
                         var emptyAd = { ad: [] };
                         if (opts && typeof opts.success === 'function') {
                             opts.success(emptyAd);
                         }
-                        var dfdAd = window.$.Deferred ? window.$.Deferred().resolve(emptyAd) : { then: function (fn) { if (fn) fn(emptyAd); return this; } };
-                        return dfdAd;
+                        return window.$.Deferred ? window.$.Deferred().resolve(emptyAd) : { then: function (fn) { if (fn) fn(emptyAd); return this; } };
                     }
                 }
                 return origAjax.apply(this, arguments);
             };
             wrappedAjax.__noAdsWrapped = true;
             window.$.ajax = wrappedAjax;
-        }
-
-        // 1b. Перехоплення XMLHttpRequest (для всіх XHR запитів реклами та VAST)
-        if (typeof XMLHttpRequest !== 'undefined' && XMLHttpRequest.prototype && !XMLHttpRequest.prototype.__noAdsWrapped) {
-            var origOpen = XMLHttpRequest.prototype.open;
-            var origSend = XMLHttpRequest.prototype.send;
-
-            XMLHttpRequest.prototype.__noAdsWrapped = true;
-
-            XMLHttpRequest.prototype.open = function (method, url) {
-                this.__noAdsUrl = typeof url === 'string' ? url : '';
-                return origOpen.apply(this, arguments);
-            };
-
-            XMLHttpRequest.prototype.send = function () {
-                var u = this.__noAdsUrl || '';
-                if (isEnabled() && u) {
-                    var isPersonal = u.indexOf('personal.lampa') !== -1;
-                    var isAdApi = AD_API_RE.test(u);
-                    var isVast = VAST_URL_RE.test(u);
-
-                    if (isPersonal || isAdApi || isVast) {
-                        var self = this;
-                        var bodyText = isPersonal ? '1' : (isAdApi ? '{"ad":[]}' : EMPTY_VAST_XML);
-                        setTimeout(function () {
-                            try {
-                                Object.defineProperty(self, 'readyState', { value: 4, configurable: true });
-                                Object.defineProperty(self, 'status', { value: 200, configurable: true });
-                                Object.defineProperty(self, 'responseText', { value: bodyText, configurable: true });
-                                Object.defineProperty(self, 'response', { value: bodyText, configurable: true });
-                                if (typeof self.onreadystatechange === 'function') self.onreadystatechange();
-                                if (typeof self.onload === 'function') self.onload();
-                                if (typeof self.dispatchEvent === 'function' && typeof Event === 'function') {
-                                    self.dispatchEvent(new Event('readystatechange'));
-                                    self.dispatchEvent(new Event('load'));
-                                }
-                            } catch (e) {}
-                        }, 1);
-                        return;
-                    }
-                }
-                return origSend.apply(this, arguments);
-            };
         }
     }
 
@@ -377,6 +330,9 @@
     if (window.Lampa && Lampa.Listener) {
         Lampa.Listener.follow('app', function (e) {
             if (e.type === 'ready' || e.type === 'start') init();
+            if (e.type === 'ready' && isEnabled() && Lampa.Noty && typeof Lampa.Noty.show === 'function') {
+                Lampa.Noty.show('NO-ADS v' + PLUGIN_VERSION + ' активний');
+            }
         });
     }
 })();
