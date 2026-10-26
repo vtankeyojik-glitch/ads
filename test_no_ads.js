@@ -1,6 +1,6 @@
 /*
  * Test for no-ads.js — проверяем ровно ту логику, на которой держится
- * отключение рекламы в Lampa (src/interaction/advert/ima.js).
+ * отключение рекламы в Lampa (src/interaction/advert/ima.js + player.js).
  *
  * Запуск:  node test_no_ads.js
  */
@@ -19,6 +19,19 @@ function makeLampa() {
         (listeners[type] || []).forEach((fn) => fn(event));
     }
 
+    function follow(type, fn) {
+        String(type).split(',').forEach((name) => {
+            (listeners[name] = listeners[name] || []).push(fn);
+        });
+    }
+
+    function play(data) {
+        send('create', { data, abort() {} });
+        // как в player.js: между create и preroll объект логируют
+        JSON.stringify(data);
+        return data;
+    }
+
     return {
         Storage: {
             _v: {},
@@ -28,10 +41,9 @@ function makeLampa() {
         SettingsApi: { addComponent() {}, addParam() {} },
         Listener: { follow(type, fn) { send(type, fn); } },
         Player: {
-            listener: {
-                follow(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
-                send
-            }
+            play,
+            iptv: play,
+            listener: { follow, send }
         }
     };
 }
@@ -50,6 +62,12 @@ function getMediaType(player_data) {
         continue: is_continue,
         any: is_torrent || is_youtube || is_continue || player_data.iptv
     };
+}
+
+function canShow(player_data) {
+    const player_type = getMediaType(player_data);
+
+    return player_type.any ? false : true;
 }
 
 /* ---------- загрузка плагина ---------- */
@@ -79,31 +97,35 @@ function check(name, cond, extra) {
 
 console.log('no-ads.js');
 
-// 1. Плагин повесил обработчик 'create'
+// 1. Player.play + лишние чтения iptv до preroll (console.log / другие плагины)
 const data = { url: 'https://example.com/movie.mp4', title: 'Test' };
-lampa.Player.listener.send('create', { data, abort() {} });
-
-// 2. Проверка рекламы: getMediaType() читает data.iptv ДВА раза
+lampa.Player.play(data);
+JSON.stringify(data);
+data.iptv;
+data.iptv;
 const type = getMediaType(data);
-check('реклама пропускается (type.any === true)', type.any === true, type);
+check('реклама пропускается после лишних чтений (type.any === true)', type.any === true, type);
+check('canShow === false пока плеер не стартовал', canShow(data) === false, canShow(data));
 
-// 3. После проверки рекламы интерфейс плеера должен видеть обычное значение
-check('после проверки data.iptv === false', data.iptv === false, data.iptv);
+// 2. После start интерфейс плеера должен видеть обычное значение
+lampa.Player.listener.send('start', data);
+check('после start data.iptv === false', data.iptv === false, data.iptv);
 
-// 4. Если Lampa сама выставила iptv (режим IPTV) — не ломаем
+// 3. Если Lampa сама выставила iptv (режим IPTV) — не ломаем
 const ipTV = { url: 'x', iptv: true };
-lampa.Player.listener.send('create', { data: ipTV, abort() {} });
+lampa.Player.play(ipTV);
 check('чужой iptv=true не перебит', ipTV.iptv === true, ipTV.iptv);
 
-// 5. vast_url от стороннего плагина гасится
-const withAd = { url: 'x', vast_url: 'https://ads.example/vast.xml' };
-lampa.Player.listener.send('create', { data: withAd, abort() {} });
+// 4. vast_url / vast_banner от стороннего плагина гасятся
+const withAd = { url: 'x', vast_url: 'https://ads.example/vast.xml', vast_banner: 'https://ads.example/banner.xml' };
+lampa.Player.play(withAd);
 check('vast_url обнулён', withAd.vast_url === null, withAd.vast_url);
+check('vast_banner обнулён', withAd.vast_banner === null, withAd.vast_banner);
 
-// 6. Выключатель в настройках
-lampa.Storage.set('lampa_no_ads_enabled', 'false');
+// 5. Выключатель в настройках
+lampa.Storage.set('lampa_no_ads_enabled', false);
 const off = { url: 'y' };
-lampa.Player.listener.send('create', { data: off, abort() {} });
+lampa.Player.play(off);
 check('при выключенной настройке data.iptv не подменяется', off.iptv === undefined, off.iptv);
 
 console.log(failed ? '\nFAILED: ' + failed : '\nOK');

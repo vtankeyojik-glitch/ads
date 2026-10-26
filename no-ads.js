@@ -2,23 +2,25 @@
  * Lampa plugin: NO-ADS
  * ---------------------------------------------------------------------------
  * Убирает рекламную заставку, которую Lampa показывает ПЕРЕД каждым
- * просмотром (VAST preroll из аккаунта + vast_url от сторонних плагинов).
+ * просмотром (VAST preroll из аккаунта + vast_url / vast_banner от плагинов).
  *
- * Почему именно так (src/interaction/advert/ima.js):
+ * Почему именно так (src/interaction/advert/ima.js + preroll.js + player.js):
+ *   Player.play() шлёт 'create', затем console.log(data), затем Preroll.show().
  *   getMediaType(data).any = torrent || youtube || continue || data.iptv
- *   Preroll.show(): если any === true -> реклама пропускается целиком,
- *   без анимации «Реклама» и без ожидания её окончания.
+ *   Preroll.show(): если any === true -> реклама пропускается целиком.
  *
- * Флаг data.iptv ставится в событии 'create' (оно приходит ДО проверки
- * рекламы) и снимается после: свойства-геттера отдают true только на
- * чтениях, которые делает проверка рекламы, и дальше — обычное значение.
- * Так интерфейс плеера (кнопка перемотки, «О фильме», счётчики) не ломается.
+ * Раньше геттер отдавал true только на 2 чтения. Это ломалось: между
+ * 'create' и Preroll.show() iptv читают другие плагины и console.log
+ * (enumerable-свойства). К моменту проверки рекламы оба «бесплатных»
+ * чтения уже были потрачены, type.any становился false, preroll шёл.
  *
- * Установка (любой из вариантов):
- *   1) Lampa -> Настройки -> Расширения -> Плагины -> Добавить -> URL файла
- *      (файл должен лежать на https-хостинге)
- *   2) положить файл как <корень lampa>/plugins/modification.js
- *   3) для Android TV: Lampa -> Настройки -> Расширения -> Плагины -> URL
+ * Теперь iptv=true держится до событий start / external / destroy —
+ * то есть ровно пока идёт решение о preroll, а интерфейс плеера после
+ * старта снова видит false.
+ *
+ * Установка:
+ *   Lampa -> Настройки -> Расширения -> Плагины -> Добавить -> URL файла
+ *   (файл должен лежать на https-хостинге)
  */
 (function () {
     'use strict';
@@ -26,11 +28,9 @@
     if (window.lampa_no_ads_ready) return;
     window.lampa_no_ads_ready = true;
 
-    // ponytail: чтений data.iptv на проверку рекламы ровно два (getMediaType:
-    // поле iptv и поле any). Два -> true, дальше обычное значение.
-    var AD_READS = 2;
-
     var KEY = 'lampa_no_ads_enabled';
+    var FLAG = '__lampa_no_ads';
+    var skipState = null;
 
     function enabled() {
         var v = Lampa.Storage.get(KEY, 'true');
@@ -38,12 +38,83 @@
         return v === true || v === 'true' || v === 1 || v === '1';
     }
 
+    function releaseSkip() {
+        if (skipState) skipState.on = false;
+    }
+
+    function markSkip(data) {
+        if (!enabled() || !data || data[FLAG]) return;
+
+        if (typeof data.vast_url === 'string') data.vast_url = null;
+        if (typeof data.vast_banner === 'string') data.vast_banner = null;
+
+        // Настоящий IPTV: не подменяем флаг, только глушим VAST от плагинов
+        if (data.iptv) {
+            data[FLAG] = true;
+            return;
+        }
+
+        var state = { on: true };
+
+        skipState = state;
+        data[FLAG] = true;
+
+        try {
+            Object.defineProperty(data, 'iptv', {
+                configurable: true,
+                enumerable: true,
+                get: function () {
+                    return state.on;
+                },
+                set: function (v) {
+                    state.on = false;
+
+                    Object.defineProperty(data, 'iptv', {
+                        value: v,
+                        writable: true,
+                        configurable: true,
+                        enumerable: true
+                    });
+                }
+            });
+        }
+        catch (e) {
+            data.iptv = true;
+            console.log('NO-ADS', 'defineProperty failed:', e.message);
+        }
+    }
+
+    function wrapPlay() {
+        if (!Lampa.Player || Lampa.Player.__lampa_no_ads_wrapped) return;
+
+        Lampa.Player.__lampa_no_ads_wrapped = true;
+
+        var origPlay = Lampa.Player.play;
+        var origIptv = Lampa.Player.iptv;
+
+        if (typeof origPlay === 'function') {
+            Lampa.Player.play = function (data) {
+                markSkip(data);
+
+                return origPlay.apply(this, arguments);
+            };
+        }
+
+        if (typeof origIptv === 'function') {
+            Lampa.Player.iptv = function (data) {
+                markSkip(data);
+
+                return origIptv.apply(this, arguments);
+            };
+        }
+    }
+
     function init() {
         try {
             Lampa.SettingsApi.addComponent({
                 component: 'lampa_no_ads',
                 name: 'NO-ADS',
-                icon: ''
+                icon: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 4l16 16M9 9H5v6h4l5 4V5L9 9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
             });
 
             Lampa.SettingsApi.addParam({
@@ -51,7 +122,7 @@
                 param: {
                     name: KEY,
                     type: 'trigger',
-                    default: 'true'
+                    default: true
                 },
                 field: {
                     name: 'Отключать рекламу перед фильмом',
@@ -63,37 +134,17 @@
             console.log('NO-ADS', 'settings api error:', e.message);
         }
 
+        wrapPlay();
+
         Lampa.Player.listener.follow('create', function (e) {
-            if (!enabled()) return;
-
-            var data = e && e.data;
-            if (!data) return;
-
-            // Lampa сама выставила iptv (режим IPTV) - не трогаем
-            if (data.iptv) return;
-
-            // реклама, которую присылают сторонние плагины (vast_url)
-            if (typeof data.vast_url === 'string') data.vast_url = null;
-
-            var reads = 0;
-
-            Object.defineProperty(data, 'iptv', {
-                configurable: true,
-                enumerable: true,
-                get: function () {
-                    reads++;
-
-                    return reads <= AD_READS ? true : false;
-                },
-                set: function (v) {
-                    Object.defineProperty(data, 'iptv', {
-                        value: v,
-                        writable: true,
-                        configurable: true
-                    });
-                }
-            });
+            markSkip(e && e.data);
         });
+
+        Lampa.Player.listener.follow('start,external,destroy', function () {
+            releaseSkip();
+        });
+
+        console.log('NO-ADS', 'ready');
     }
 
     if (window.appready) init();
